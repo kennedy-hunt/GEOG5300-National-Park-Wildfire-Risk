@@ -1,0 +1,293 @@
+---
+title: "National Park Wildfire Risk"
+subtitle: "GEOG 5300 - Final Project Part 3"
+author: "Kennedy Hunt"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r, include = FALSE}
+library(sf)
+library(terra)
+library(ggplot2)
+library(dplyr)
+library(raster)
+library(patchwork)
+library(knitr)
+library(spdep)
+
+### National Parks ###
+nps <- read_sf("nps_boundary/nps_boundary.shp")
+nps$UNIT_TYPE[158] <- "National Parks"
+parks <- nps %>%
+  filter(UNIT_TYPE == "National Parks") %>%
+  dplyr::select(OBJECTID, UNIT_CODE, UNIT_NAME, STATE, REGION, PARKNAME, Shape__Are, Shape__Len) %>%
+  filter(!UNIT_CODE %in% c("NPSA", "VIIS"))
+parks <- parks %>%
+  mutate(REGION = case_when(
+    STATE == "HI" ~ "HI", 
+    TRUE ~ REGION
+  ))
+
+st_write(parks, "Cleaned/ntlparks_boundaries.shp", append=FALSE)
+
+parks <- read_sf("Cleaned_Data/ntlparks_boundaries.shp")
+
+parks_cont <- parks %>% filter(!STATE %in% c("AK", "HI", "AS", "PR", "GU"))
+parks_ak <- parks %>% filter(STATE == "AK")
+parks_hi <- parks %>% filter(STATE == "HI")
+
+
+
+### Wilfire Risk ###
+wldf_ak <- terra::rast("Data/whp2023_GeoTIF/whp2023_cls_ak.tif")
+wldf_cont_us <- terra::rast("Data/whp2023_GeoTIF/whp2023_cls_conus.tif")
+wldf_hi <- terra::rast("Data/whp2023_GeoTIF/whp2023_cls_hi.tif")
+
+## Reproject ##
+crs(parks_cont)
+crs(wldf_cont_us)
+parks_cont <- st_transform(parks_cont, crs(wldf_cont_us))
+
+crs(parks_ak)
+crs(wldf_ak)
+parks_ak <- st_transform(parks_ak, crs(wldf_ak))
+
+crs(parks_hi)
+crs(wldf_hi)
+parks_hi <- st_transform(parks_hi, crs(wldf_hi))
+
+#parks <- read_sf("Cleaned_Data/ntlparks_boundaries.shp")
+#wldf_parks <- read_sf("Cleaned_Data/nps_wldf_extracted.shp")
+```
+
+# The Challenge
+The analysis aims to discover which U.S. National Parks are the most at-risk to wildfires, and if parks with high risk are spatially clustered. This information will help the U.S. National Park Services know which parks may need more wildfire precautions and where to focus wildfire prevention efforts during hot and dry seasons. Below are maps of the three regions of interest: National parks in the lower 48 states, National Parks in Alaska, and National Parks in Hawaii.
+
+```{r, echo=FALSE}
+ggplot(parks_cont) + geom_sf() +
+  labs(title = "Continental U.S. National Parks Boundaries") + theme_minimal()
+ggplot(parks_ak) + geom_sf() +
+  labs(title = "Alaska National Parks Boundaries") + theme_minimal()
+ggplot(parks_hi) + geom_sf() +
+  labs(title = "Hawaii National Parks Boundaries") + theme_minimal()
+
+```
+
+
+# Data overview
+My data consists on two datasets: U.S. National Park Boundaries and United States Wildfire Hazard Potential. The US National Parks dataset is from U.S. Department of Transportation, Bureau of Transportation Statistics (BTS). It includes not only national parks, but also monuments, historic sites, memorials, etc, so there are a total of 437 observations. It has 21 variables that describe the name, location, park type, size, and creator/editor information. This dataset was created by the Land Resources Division in 1995 and was last updated by the National Parks Service at the beginning of 2026. This data is intended for GIS analysis, and not surveying or legal use. I have filtered this dataset to include only National Parks in the states, shrinking it to 61 observations. I have also split it into three pieces: Continental U.S., Alaska, and Hawaii, so that it matches the wildfire hazard potential dataset.
+
+The wildfire hazard potential data is a classified raster in the form of three datasets: Alaska, continental U.S., and Hawaii. This data is the 2023 version, created from national datasets of annual burn probability and fire intensity from the USDA Forest Service. It uses data from LANDFIRE 2020 for the landscape conditions and wildland fuels. Because of this, landscape conditions are a few years outdated and any major changes in land cover type won’t be reflected in the data. This limits the generalization of this analysis for current and future years. This analysis will more accurately reflect which parks had the greatest risk of wildfires a few years ago.
+
+### References
+#### U.S. National Park Boundaries
+Bureau of Transportation Statistics. (2026). National parks [Data set]. U.S. Department of Transportation, National Transportation Atlas Database. Retrieved March 2, 2026, from https://geodata.bts.gov/datasets/usdot::national-parks/about
+
+#### Wildfire Hazard Potential
+Dillon, Gregory K. 2023. Wildfire Hazard Potential for the United States (270-m), version 2023. 4th Edition. Updated 17 July 2024. Fort Collins, CO: Forest Service Research Data Archive. https://doi.org/10.2737/RDS-2015-0047-4.
+
+
+# Visualizations
+```{r, echo=FALSE}
+# Viz 1
+parks_by_region <- parks %>%
+  st_drop_geometry() %>%
+  group_by(REGION) %>%
+  summarise(n_parks = n()) %>%
+  arrange(desc(n_parks))
+ggplot(parks_by_region, aes(x = reorder(REGION, -n_parks), y = n_parks)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(
+    title = "Number of National Parks by Region",
+    x = "Region",
+    y = "Number of Parks"
+  ) + 
+  theme_minimal()
+```
+The Intermountain and Pacific West regions contain the highest count of national parks. This shows that the western United States contains a majority of the parks. This uneven distribution is important to keep in mind, as regions with more densely packed parks may naturally exhibit different spatial autocorrelation patterns than regions with very fewer parks.
+
+```{r, echo=FALSE}
+# Viz 2
+par(mfrow = c(2, 2))
+plot(wldf_cont_us, main = "Contiguous US Wildfire Risk")
+plot(wldf_ak, main = "Alaska Wildfire Risk")
+plot(wldf_hi, main = "Hawaii Wildfire Risk")
+par(mfrow = c(1, 1))
+```
+The above plots show the wildfire risk classifications of the United States. This data will be used to analyze which national parks are most at risk.
+
+```{r, echo=FALSE}
+# Viz 3
+parks_for_plot <- parks %>%
+  # 1. Repair any broken polygon boundaries
+  st_make_valid() %>%
+  
+  # 2. Calculate the area on the newly repaired geometries
+  mutate(
+    Area_km2 = as.numeric(st_area(geometry)) / 1000000 
+  ) %>%
+  
+  # 3. Drop the geometry for plotting
+  st_drop_geometry()
+
+ggplot(parks_for_plot, aes(x = reorder(REGION, Area_km2, FUN = median), y = Area_km2, fill = REGION)) +
+  geom_boxplot(alpha = 0.7) +
+  # We use a log10 scale because national park sizes vary drastically!
+  # Without this, massive parks like Wrangell-St. Elias squash all the others to the bottom.
+  scale_y_log10(labels = scales::comma) + 
+  labs(
+    title = "Distribution of National Park Sizes by Region",
+    x = "Region",
+    y = "Area (Square Kilometers) - Log10 Scale"
+  ) +
+  theme_minimal() +
+  # Hide the legend since the x-axis already shows the region names clearly
+  theme(legend.position = "none")
+```
+This box and whisker plot shows how the area of national parks in square kilometers varies across regions of the United States. The Y-axis is on a log-scale for better visualization because parks sizes widely vary. Alaska's parks are significantly larger than the majority of national parks. 
+
+# Analysis
+```{r, echo=FALSE}
+### Attribute Table Mess ###
+# 1. Create a function out of your workaround
+fix_wldf_levels <- function(filepath) {
+  r <- raster(filepath)
+  wldf <- rast(filepath)
+  
+  lev <- levels(r)[[1]] 
+  lev <- lev[, c("ID", "class_desc")]  # Keep ID and label
+  lev$class_desc <- as.character(lev$class_desc)  
+  lev$class_desc[is.na(lev$class_desc)] <- "Unknown"  
+  
+  levels(wldf) <- lev
+  return(wldf) # Returns the fixed terra SpatRaster
+}
+# 2. Apply it to your three specific files
+wldf_cont_us <- fix_wldf_levels("Data/whp2023_GeoTIF/whp2023_cls_conus.tif")
+wldf_ak <- fix_wldf_levels("Data/whp2023_GeoTIF/whp2023_cls_ak.tif")
+wldf_hi <- fix_wldf_levels("Data/whp2023_GeoTIF/whp2023_cls_hi.tif")
+
+
+### Extraction ###
+parks_cont_vect <- vect(parks_cont)
+parks_ak_vect <- vect(parks_ak)
+parks_hi_vect <- vect(parks_hi)
+
+# Step 2: Extract the majority (modal) risk class for each park
+wldf_ext_cont <- terra::extract(wldf_cont_us, parks_cont_vect, fun = "modal", na.rm = TRUE)
+wldf_ext_ak <- terra::extract(wldf_ak, parks_ak_vect, fun = "modal", na.rm = TRUE)
+wldf_ext_hi <- terra::extract(wldf_hi, parks_hi_vect, fun = "modal", na.rm = TRUE)
+
+
+# 2. Attach the extracted numeric IDs (1-7) to your parks dataframe
+parks_cont$ID <- wldf_ext_cont[, 2]
+parks_ak$ID <- wldf_ext_ak[, 2]
+parks_hi$ID <- wldf_ext_hi[, 2]
+
+
+# 3. MANUALLY create the risk key (Bulletproof method)
+risk_key <- data.frame(
+  ID = c(1, 2, 3, 4, 5, 6, 7),
+  risk_label = c("Very Low", "Low", "Moderate", "High", "Very High", "Non-burnable", "Water")
+)
+
+# 4. Join them together
+parks_cont <- parks_cont %>%
+  left_join(risk_key, by = "ID") %>%
+  # Rename ID to risk_level to keep it clean
+  rename(risk_level = ID) %>%
+  # Turn the label into an ordered factor so your legends plot in the correct order!
+  mutate(risk_label = factor(risk_label, levels = risk_key$risk_label))
+
+parks_ak <- parks_ak %>%
+  left_join(risk_key, by = "ID") %>%
+  # Rename ID to risk_level to keep it clean
+  rename(risk_level = ID) %>%
+  # Turn the label into an ordered factor so your legends plot in the correct order!
+  mutate(risk_label = factor(risk_label, levels = risk_key$risk_label))
+
+parks_hi <- parks_hi %>%
+  left_join(risk_key, by = "ID") %>%
+  # Rename ID to risk_level to keep it clean
+  rename(risk_level = ID) %>%
+  # Turn the label into an ordered factor so your legends plot in the correct order!
+  mutate(risk_label = factor(risk_label, levels = risk_key$risk_label))
+```
+
+I combined the two datasets and extracted the wildfire risk data for each national park, like a cookie cutter. I used a "majority" function, which assigns each national park to a single risk level -- whichever risk level covers the most area. Once the majority wildfire risk was extracted for each park, I visualized the results using of series of color-coded maps.
+
+```{r, echo=FALSE}
+risk_colors <- c(
+  "Very Low" = "#1a9850",     # Dark Green
+  "Low" = "#91cf60",          # Light Green
+  "Moderate" = "#ffffbf",     # Yellow
+  "High" = "#fc8d59",         # Orange
+  "Very High" = "#d73027",    # Red
+  "Non-burnable" = "#969696", # Gray
+  "Water" = "#4575b4"         # Blue
+)
+
+## CONUS
+parks_west <- parks_cont %>% 
+  filter(REGION %in% c("PW", "IM"))
+
+parks_east <- parks_cont %>% 
+  filter(REGION %in% c("MW", "NE", "SE"))
+
+# Western 
+ggplot(data = parks_west) +
+  geom_sf(aes(fill = risk_label), color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = risk_colors, drop = FALSE, name = "Majority Risk") +
+  theme_void() +
+  ggtitle("Wildfire Risk: Pacific West & Intermountain Regions") +
+  theme_minimal()
+
+# Eastern/Midwestern 
+ggplot(data = parks_east) +
+  geom_sf(aes(fill = risk_label), color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = risk_colors, drop = FALSE, name = "Majority Risk") +
+  theme_void() +
+  ggtitle("Wildfire Risk: Midwest, Northeast, & Southeast Regions") +
+  theme_minimal()
+ 
+# Alaska Map
+ggplot(data = parks_ak) +
+  geom_sf(aes(fill = risk_label), color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = risk_colors, drop = FALSE, name = "Majority Risk") +
+  theme_void() +
+  ggtitle("Wildfire Risk: Alaska") +
+  theme_minimal()
+
+# Hawaii Map
+ggplot(data = parks_hi) +
+  geom_sf(aes(fill = risk_label), color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = risk_colors, drop = FALSE, name = "Majority Risk") +
+  theme_void() +
+  ggtitle("Wildfire Risk: Hawaii") +
+  theme_minimal()
+```
+There are three national parks with a majority of "High" or "Very High" wildfire risk level. They are:
+
+```{r, echo=FALSE}
+# Rank them, plot highest
+highs <- parks_cont %>%
+  filter(risk_level == 4 | risk_level == 5) %>%
+  dplyr::select(PARKNAME, risk_label)  %>%
+  st_drop_geometry()
+
+highs
+```
+
+To determine if the wildfire risk across contiguous US National Parks exhibits a statistically significant spatial pattern, I conducted a Moran's I test. Because the parks do not share physical borders, a k-Nearest Neighbors (kNN) spatial weights matrix was used, linking each park to its four closest neighbors.
+
+```{r, echo=FALSE, warning=FALSE}
+park_centroids <- st_centroid(parks_cont)
+coords <- st_coordinates(park_centroids)
+knn_list <- knearneigh(coords, k = 4)
+park_nb <- knn2nb(knn_list)
+park_weights <- nb2listw(park_nb, style = "W")
+moran_result <- moran.test(parks_cont$risk_level, park_weights)
+print(moran_result)
+```
+
+The test yielded a Moran's I statistic of 0.142 and a p-value of 0.032. Because the p-value is less than the standard 0.05 threshold, we can reject the null hypothesis of spatial randomness. The positive Moran's I statistic indicates statistically significant positive spatial autocorrelation. In other words, this test proves what we visually observe in the thematic maps: wildfire risk in US National Parks is geographically clustered, with high-risk parks significantly grouped together (mainly in the Western regions) rather than being randomly scattered across the country.
