@@ -3,7 +3,7 @@
 ### April 26, 2026
 
 ## Introduction
-The analysis aims to discover which U.S. National Parks are the most at-risk to wildfires, and if parks with high risk are spatially clustered. This information will help the U.S. National Park Services know which parks may need more wildfire precautions and where to focus wildfire prevention efforts during hot and dry seasons. Below are maps of the three regions of interest: National parks in the lower 48 states, National Parks in Alaska, and National Parks in Hawaii.
+This analysis aims to discover which U.S. National Parks are the most at-risk to wildfires, and if parks with high risk are spatially clustered. This information will help the U.S. National Park Services know which parks may need more wildfire precautions and where to focus wildfire prevention efforts during hot and dry seasons. Below are maps of the three regions of interest: National parks in the lower 48 states, National Parks in Alaska, and National Parks in Hawaii.
 
 <img width="1344" height="960" alt="image" src="https://github.com/user-attachments/assets/c9f75cf3-ceb3-4fa8-a4b2-55d858e24f10" />
 <img width="1344" height="960" alt="image" src="https://github.com/user-attachments/assets/45204aaf-bad8-4dd4-93c2-9df3daa49a52" />
